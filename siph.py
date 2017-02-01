@@ -37,13 +37,13 @@ def generate_test_I(sigma=0.1, L=3., nphotons=1000, noise_sigma=None, photon_ene
             values[ii] = v
     return values
 
-I_arr = lambda nbins: np.linspace(-0.5, 1.5, nbins)
-dI_arr = lambda nbins: 2.0/(nbins-1)
+I_arr = lambda nbins, vmin=-0.5, vmax=1.5: np.linspace(vmin, vmax, nbins)
+dI_arr = lambda nbins, vmin=-0.5, vmax=1.5: (vmax-vmin)/(nbins-1)
 
-def histogram(values, nbins): 
-    dI = dI_arr(nbins)
-    H_test, edges = np.histogram(values, nbins, range=(-0.5-dI/2.,1.5+dI/2.))
-    I_test = I_arr(nbins)
+def histogram(values, nbins, vmin=-0.5, vmax=1.5): 
+    dI = dI_arr(nbins, vmin, vmax)
+    H_test, edges = np.histogram(values, nbins, range=(vmin-dI/2.,vmax+dI/2.))
+    I_test = I_arr(nbins, vmin, vmax)
     return I_test, H_test
 
 def generate_test_hist_I(sigma=0.1, L=3., nphotons=1000, noise_sigma=None, nbins=101, photon_energy=1.0):
@@ -51,23 +51,27 @@ def generate_test_hist_I(sigma=0.1, L=3., nphotons=1000, noise_sigma=None, nbins
     I_test, H_test = histogram(v, nbins)
     return I_test, H_test
 
-_hist_I = lambda sigma, L, nphotons, nbins, photon_energy: f_I(I_arr(nbins)/photon_energy, sigma, L) * 2./(photon_energy*nbins) * nphotons
-def hist_I(sigma, L, nphotons, noise_sigma=None, nbins=101, photon_energy=1.0):
-    I = I_arr(nbins)
-    dI = dI_arr(nbins)
-    H = _hist_I(sigma, L, nphotons, nbins, photon_energy)
+_hist_I = lambda sigma, L, nphotons, nbins, photon_energy, vmin, vmax: f_I(I_arr(nbins, vmin, vmax)/photon_energy, sigma, L) * (vmax-vmin)/(photon_energy*nbins) * nphotons
+def hist_I(sigma, L, nphotons, noise_sigma=None, nbins=101, photon_energy=1.0, vmin=-0.5, vmax=1.5):
+    I = I_arr(nbins, vmin, vmax)
+    dI = dI_arr(nbins, vmin, vmax)
+    H = _hist_I(sigma, L, nphotons, nbins, photon_energy, vmin, vmax)
     # Fix lowest and highest intensity bin (avoid imprecision and trouble with inf)
-    i0 = np.where( (I+dI/2.)/photon_energy >= I_x_approx(L/2., sigma) )[0][0]
-    H[:i0] = 0
-    H[i0] = (L**2 - (x_I((I[i0]+dI/2.)/photon_energy, sigma)*2)**2) / L**2 * nphotons
+    tmp = np.where( (I+dI/2.)/photon_energy >= I_x_approx(L/2., sigma) )[0]
+    if len(tmp) > 0:
+        i0 = tmp[0]
+        H[:i0] = 0
+        H[i0] = (L**2 - (x_I((I[i0]+dI/2.)/photon_energy, sigma)*2)**2) / L**2 * nphotons
     # High intensities
-    i1 =  np.where( (I+dI/2.)/photon_energy >= I_x_approx(0., sigma) )[0][0]
-    H[i1] = (x_I((I[i1]-dI/2.)/photon_energy, sigma) * 2)**2 / L**2 * nphotons
+    tmp = np.where( (I+dI/2.)/photon_energy >= I_x_approx(0., sigma) )[0]
+    if len(tmp) > 0:
+        i1 = tmp[0]
+        H[i1] = (x_I((I[i1]-dI/2.)/photon_energy, sigma) * 2)**2 / L**2 * nphotons
     # Set remaining infinite values to zero
     H[np.isnan(H) | np.isinf(H)] = 0    
     if noise_sigma is not None:
         gauss = lambda i, s: np.exp(-i**2/(2.*s**2))
-        G = gauss(I-0.5, noise_sigma)
+        G = gauss(I_arr(nbins, -(vmax-vmin)/2., (vmax-vmin)/2.), noise_sigma)
         H = np.convolve(H, G/G.sum(), 'same')
     return I, H
 
@@ -86,18 +90,19 @@ def fit_hist(H, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
     [sigma_fit, L_fit, noise_sigma_fit] = x_fit
     return sigma_fit, L_fit, nphotons, noise_sigma_fit
 
-def fit_hist2(H, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
-    nbins = len(H)
+def fit_hist2(I, H, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
+    assert len(I) == len(H)
+    nbins = len(I)
     nphotons = H.sum()
 
     # 1) Simple Gaussian fit for getting good estimate for noise_sigma
-    tmp = np.linspace(-0.5, 1.5, nbins)
-    func = lambda noise_sigma: 1-scipy.stats.pearsonr(np.exp(-tmp[:nbins/4]**2/(2.*noise_sigma**2)), H[:nbins/4])[0]
+    S = I <= 0
+    func = lambda noise_sigma: 1-scipy.stats.pearsonr(np.exp(-I[S]**2/(2.*noise_sigma**2)), H[S])[0]
     noise_sigma_fit = scipy.optimize.leastsq(func, noise_sigma)[0][0]
     # 2) Now fit of the other variables
     x0 = [sigma, L]
-    S = (tmp>=0.25)#*(tmp<=1.0)
-    func = lambda x: abs(hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins, photon_energy=photon_energy)[1] - H)[S]#/(np.finfo("float64").resolution + hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins)[1] + H)
+    S = (I>=0.25)#*(tmp<=1.0)
+    func = lambda x: abs(hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins, photon_energy=photon_energy, vmin=I[0], vmax=I[-1])[1] - H)[S]#/(np.finfo("float64").resolution + hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins)[1] + H)
     assert np.isnan(func(x0).any()) == False
     x_fit = scipy.optimize.leastsq(func, x0,
                                    args=(), Dfun=None,
@@ -107,17 +112,19 @@ def fit_hist2(H, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
     [sigma_fit, L_fit] = x_fit
     return sigma_fit, L_fit, nphotons, noise_sigma_fit
 
-def fit_hist_S(H, S, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
-    nbins = len(H)
+def fit_hist_S(I, H, S, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
+    assert len(I) == len(H)
+    nbins = len(I)
     nphotons = H.sum()
 
     # 1) Simple Gaussian fit for getting good estimate for noise_sigma
-    tmp = np.linspace(-0.5, 1.5, nbins)
-    func = lambda noise_sigma: 1-scipy.stats.pearsonr(np.exp(-tmp[:nbins/4]**2/(2.*noise_sigma**2)), H[:nbins/4])[0]
+    S0 = I <= 0
+    func = lambda noise_sigma: 1-scipy.stats.pearsonr(np.exp(-I[S0]**2/(2.*noise_sigma**2)), H[S0])[0]
     noise_sigma_fit = scipy.optimize.leastsq(func, noise_sigma)[0][0]
     # 2) Now fit of the other variables
     x0 = [sigma, L]
-    func = lambda x: abs(hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins, photon_energy=photon_energy)[1] - H)[S]#/(np.finfo("float64").resolution + hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins)[1] + H)
+    #S = (I>=0.25)#*(tmp<=1.0)
+    func = lambda x: abs(hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins, photon_energy=photon_energy, vmin=I[0], vmax=I[-1])[1] - H)[S]#/(np.finfo("float64").resolution + hist_I(sigma=x[0], L=x[1], nphotons=nphotons, noise_sigma=noise_sigma_fit, nbins=nbins)[1] + H)
     assert np.isnan(func(x0).any()) == False
     x_fit = scipy.optimize.leastsq(func, x0,
                                    args=(), Dfun=None,
@@ -126,7 +133,6 @@ def fit_hist_S(H, S, sigma=0.2, L=3, noise_sigma=0.1, photon_energy=1.0):
                                    maxfev=0, epsfcn=None, factor=100, diag=None)[0]
     [sigma_fit, L_fit] = x_fit
     return sigma_fit, L_fit, nphotons, noise_sigma_fit
-
 
 
 
